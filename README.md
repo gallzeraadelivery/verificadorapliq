@@ -76,6 +76,22 @@ escolhido pela plataforma, ou cancele/recrie cadastros automaticamente.
   ver [`packages/verification-detector/README.md`](./packages/verification-detector/README.md)
   e o [relatório de precisão](./packages/verification-detector/ACCURACY_REPORT.md).
 
+## Fase 5 — o que já existe
+
+- **UberDriverApplicationAdapter** (`packages/platform-adapters`): automatiza login
+  (se exigido), preenchimento do formulário administrativo e verificação de e-mail
+  (via `EmailVerificationWorker`, Fase 2) contra o fluxo real do mock server (Fase 3),
+  parando **imediatamente** ao classificar a página atual (via `VerificationFlowDetector`,
+  Fase 4) como foto de perfil, CNH, CAPTCHA, 2FA ou bloqueio de segurança - nunca tenta
+  completar essas etapas. URLs/timeouts (`config.ts`) e seletores CSS (`selectors.ts`)
+  ficam inteiramente separados da lógica de automação (`steps/*.ts` e
+  `UberDriverApplicationAdapter.ts`), para que uma mudança de layout exija editar só os
+  dois primeiros arquivos. Validado com **9/9 testes passando (100%)** rodando um
+  Chromium headless real contra o mock server real (não fixtures escritas à mão) -
+  ver [`packages/platform-adapters/README.md`](./packages/platform-adapters/README.md)
+  para a estrutura completa, como estender para outra plataforma/provedor, e o
+  relatório de testes.
+
 ## Estrutura
 
 ```
@@ -94,7 +110,7 @@ uber-automation/
 │   ├── automation/                # BrowserProfileManager (sessões isoladas)
 │   ├── email-service/              # EmailVerificationWorker (Gmail via Playwright)
 │   ├── verification-detector/       # VerificationFlowDetector (deteção informativa de provedor)
-│   └── platform-adapters/            # (stub — Fase 5+, preenchimento do form Uber)
+│   └── platform-adapters/            # UberDriverApplicationAdapter (Fase 5)
 └── infra/docker/    # Dockerfiles e docker-compose.yml
 ```
 
@@ -164,7 +180,7 @@ uber-automation/
 pnpm test
 ```
 
-138 testes, nenhum exige Postgres/Redis reais (usam fakes/mocks injetados via DI - ver
+147 testes, nenhum exige Postgres/Redis reais (usam fakes/mocks injetados via DI - ver
 `packages/*/src/**/*.test.ts` e `apps/*/src/**/*.test.ts`). Cobrem:
 
 - Validações de importação (`packages/shared`): email inválido, duplicidade no arquivo,
@@ -194,6 +210,13 @@ pnpm test
   buscam o HTML real do `apps/mock-server` via `supertest` e rodam o detector contra
   ele - inclui os 8 cenários da Fase 4 e a página de login (nunca classificada como
   verificação/desafio).
+- **UberDriverApplicationAdapter (Fase 5)** (`packages/platform-adapters`): 9 testes que
+  sobem o mock server (Fase 3) num processo HTTP real numa porta efêmera e dirigem um
+  Chromium headless real contra ele (não `supertest`/HTML capturado à mão - o adaptador
+  precisa de uma `Page` de verdade para preencher/clicar). Cobrem os 8 cenários terminais
+  (foto de perfil Socure/outro provedor, CNH Socure/outro provedor, CAPTCHA, 2FA,
+  bloqueio de segurança) mais um teste dedicado de que a automação entrega o controle
+  (`status = 'PAUSED'`) em vez de continuar ou fechar a sessão sozinha.
 
 Validações que dependem do banco (duplicidade já existente na empresa, proxy
 inexistente, e-mail já associado a outro motorista) são testadas na camada de serviço da
@@ -371,14 +394,29 @@ de chave).
   (retentável) e `NonRetryableAutomationError`/`SecurityChallengeError` (nunca
   retentado - o job é descartado via `job.discard()` e o motorista passa para
   `AWAITING_HUMAN_ACTION`, que já aparece no dashboard/listagem existentes).
+- **UberDriverApplicationAdapter**: nunca declara sucesso silenciosamente diante de uma
+  página que não reconhece - só quando um indicador de conclusão positivo e conhecido é
+  encontrado (`CompletionStep.ts`); caso contrário falha explicitamente
+  (`AutomationStepError` `UNRECOGNIZED_PAGE`), para nunca mascarar uma etapa sensível
+  cujo layout mudou. Login nunca usa uma senha inventada - se a plataforma exigir login e
+  nenhuma credencial tiver sido configurada, falha explicitamente
+  (`UBER_CREDENTIALS_MISSING`) em vez de tentar um valor arbitrário. **Limitação
+  conhecida**: os seletores/URLs de `config.ts`/`selectors.ts` foram validados apenas
+  contra `apps/mock-server` (Fase 3) - o placeholder para a Uber real
+  (`UBER_PRODUCTION_CONFIG_PLACEHOLDER`) nunca foi validado contra `partners.uber.com`
+  (este projeto nunca navegou no site real); veja o aviso em
+  `packages/platform-adapters/src/adapters/uber/config.ts` antes de apontar para
+  produção. O ciclo de vida do navegador (proxy, perfil persistido via
+  `BrowserProfileManager`) ainda não está conectado - o adaptador usa um Chromium
+  headless simples por padrão, substituível via `createBrowserSession`.
 
-## Próximos passos (Fase 5+)
+## Próximos passos (Fase 6+)
 
-Consulte as fases seguintes conforme forem detalhadas. Com o ambiente de testes local
-(Fase 3) e o detector de provedor (Fase 4) no lugar, a próxima fase deve implementar as
-etapas de preenchimento do formulário em `packages/platform-adapters` (hoje um stub)
-contra o `apps/mock-server`, conectá-las à fila `automation-jobs` (hoje só executa o
-passo `AWAIT_EMAIL_CODE`), e usar o `VerificationFlowDetector` já validado para decidir,
-a cada etapa: continuar preenchendo dados administrativos, ou parar e marcar
-`AWAITING_HUMAN_ACTION` assim que uma página de foto/CNH/CAPTCHA/2FA/bloqueio for
-detectada - nunca tentando prosseguir sozinha por essas etapas.
+Consulte as fases seguintes conforme forem detalhadas. Com o adaptador da Uber (Fase 5)
+validado contra o mock server, a próxima fase deve conectá-lo à fila `automation-jobs`
+(hoje só executa o passo `AWAIT_EMAIL_CODE`) via `apps/worker`, implementar o
+`createBrowserSession` de produção (proxy por `proxyId` via `@uber-automation/proxy-manager`
++ perfil persistido por `browserProfileId` via `BrowserProfileManager`), e mapear
+`AutomationResult` do adaptador para os erros já existentes em `apps/worker/src/errors.ts`
+(`NonRetryableAutomationError` para `VERIFICATION_DETECTED`, `TechnicalAutomationError`
+para `ERROR`) - sem nunca tentar prosseguir sozinha por uma etapa sensível.
